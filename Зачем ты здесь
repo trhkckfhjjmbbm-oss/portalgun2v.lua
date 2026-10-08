@@ -1,0 +1,505 @@
+-- LocalScript → StarterPlayer > StarterPlayerScripts (ваша игра, Studio). Только клиент.
+-- Q / «Пушка» — достать · клик мыши / «ПОРТАЛ» — выстрел · подойдите к порталу вплотную — пройти.
+-- На R15 рука поднимается при прицеливании. Ошибки показываются на экране под кнопками и в Output.
+print("[PortalGun] скрипт запущен")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local WS = game:GetService("Workspace")
+
+local plr = Players.LocalPlayer
+if not plr then
+	warn("[PortalGun] Это Script, а нужен LocalScript (StarterPlayer → StarterPlayerScripts)")
+	return
+end
+local pg = plr:WaitForChild("PlayerGui", 15)
+if not pg then
+	warn("[PortalGun] Нет PlayerGui")
+	return
+end
+
+local V = Vector3.new
+local PW, PH = 5.2, 8
+local LIGHT, LIGHT2, GREYD = Color3.fromRGB(206, 207, 212), Color3.fromRGB(180, 182, 188), Color3.fromRGB(120, 122, 130)
+local BLACK, RED = Color3.fromRGB(28, 28, 32), Color3.fromRGB(225, 40, 40)
+local LIME, GREEN, DGREEN = Color3.fromRGB(150, 255, 70), Color3.fromRGB(60, 210, 60), Color3.fromRGB(18, 100, 36)
+local NEON, CYL, BALL = Enum.Material.Neon, Enum.PartType.Cylinder, Enum.PartType.Ball
+local UP = CFrame.Angles(0, 0, math.rad(90))
+
+local char, hum, root, gun, shoulderC0
+local fovAdd = 0
+local equipped = false
+local portals, dying, beams = {}, {}, {}
+local nextSlot, tpCd, fireCd, kick, flash, tpFlash = 1, 0, 0, 0, 0, 0
+local touchOnly = UIS.TouchEnabled and not UIS.MouseEnabled
+
+---------------------------------------------------------------- интерфейс
+local gui = Instance.new("ScreenGui")
+gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "PortalGunUI", false, 45
+gui.Parent = pg
+
+local function button(text, pos, size, round)
+	local b = Instance.new("TextButton")
+	b.Text, b.Size, b.Position = text, size, pos
+	b.BackgroundColor3, b.BackgroundTransparency, b.BorderSizePixel = Color3.fromRGB(16, 22, 16), 0.1, 0
+	b.Font, b.TextSize, b.TextColor3 = Enum.Font.GothamBold, 14, LIME
+	local c = Instance.new("UICorner")
+	c.CornerRadius = round and UDim.new(1, 0) or UDim.new(0, 8)
+	c.Parent = b
+	local s = Instance.new("UIStroke")
+	s.Color, s.Thickness, s.ApplyStrokeMode = LIME, 1.4, Enum.ApplyStrokeMode.Border
+	s.Parent = b
+	b.Parent = gui
+	return b
+end
+
+local btnGun = button("Пушка: ВЫКЛ", UDim2.new(0, 12, 0.3, 0), UDim2.fromOffset(130, 36))
+local btnClose = button("Закрыть порталы", UDim2.new(0, 12, 0.3, 42), UDim2.fromOffset(130, 36))
+local btnFire = button("ПОРТАЛ", UDim2.new(1, -104, 1, -104), UDim2.fromOffset(80, 80), true)
+btnFire.Visible = false
+
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Position, statusLbl.Size = UDim2.new(0, 12, 0.3, 84), UDim2.fromOffset(200, 70)
+statusLbl.BackgroundTransparency, statusLbl.Font, statusLbl.TextSize = 1, Enum.Font.Gotham, 11
+statusLbl.TextColor3, statusLbl.TextWrapped = Color3.fromRGB(190, 255, 160), true
+statusLbl.TextXAlignment, statusLbl.TextYAlignment = Enum.TextXAlignment.Left, Enum.TextYAlignment.Top
+statusLbl.Text = "Q или «Пушка» — достать пушку"
+statusLbl.Parent = gui
+
+local flashFrame = Instance.new("Frame")
+flashFrame.Size, flashFrame.BackgroundColor3 = UDim2.fromScale(1, 1), LIME
+flashFrame.BackgroundTransparency, flashFrame.BorderSizePixel = 1, 0
+flashFrame.Active, flashFrame.ZIndex = false, 100
+flashFrame.Parent = gui
+
+local cross = Instance.new("Frame")
+cross.AnchorPoint, cross.Position, cross.Size = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.fromOffset(8, 8)
+cross.BackgroundColor3, cross.BackgroundTransparency, cross.BorderSizePixel, cross.Visible = LIME, 0.2, 0, false
+Instance.new("UICorner", cross).CornerRadius = UDim.new(1, 0)
+cross.Parent = gui
+
+local function say(msg)
+	statusLbl.Text = msg
+end
+
+local function safe(name, fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then
+		warn("[PortalGun] " .. name .. ": " .. tostring(err))
+		say("Ошибка (" .. name .. "): " .. tostring(err))
+	end
+	return ok
+end
+
+---------------------------------------------------------------- детали
+local function part(parent, size, color, mat, shape, tr, anchored)
+	local p = Instance.new("Part")
+	p.Size, p.Color, p.Material, p.Transparency = size, color, mat or Enum.Material.SmoothPlastic, tr or 0
+	if shape then
+		p.Shape = shape
+	end
+	p.Anchored = anchored or false
+	p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow, p.Massless = false, false, false, false, true
+	p.Parent = parent
+	return p
+end
+
+local function emitter(parent, rate, life, speed, size, c0, c1)
+	local e = Instance.new("ParticleEmitter")
+	e.Rate, e.Lifetime, e.Speed = rate, NumberRange.new(life[1], life[2]), NumberRange.new(speed[1], speed[2])
+	e.SpreadAngle, e.Size, e.LightEmission = Vector2.new(180, 180), NumberSequence.new(size, 0), 1
+	e.Color, e.Transparency = ColorSequence.new(c0, c1), NumberSequence.new(0.1, 1)
+	e.Parent = parent
+	return e
+end
+
+---------------------------------------------------------------- пушка
+local function buildGun()
+	local m = Instance.new("Model")
+	m.Name = "LocalPortalGun"
+	local grip = part(m, V(0.2, 0.2, 0.2), LIME, nil, nil, 1)
+	local gw = Instance.new("Weld")
+	gw.Part1 = grip
+	gw.Parent = grip
+
+	local function add(size, cf, color, mat, shape, tr)
+		local p = part(m, size, color, mat, shape, tr)
+		local j = Instance.new("Weld")
+		j.Part0, j.Part1, j.C0 = grip, p, cf
+		j.Parent = p
+		return p, j
+	end
+
+	add(V(0.62, 0.42, 1.1), CFrame.new(0, 0.1, -0.55), LIGHT) -- корпус
+	add(V(0.5, 0.34, 0.3), CFrame.new(0, 0.08, -1.25), LIGHT2) -- носик
+	add(V(0.3, 0.32, 1), CFrame.new(0, -0.1, 0.5) * CFrame.Angles(math.rad(20), 0, 0), LIGHT) -- рукоятка
+	add(V(0.34, 0.34, 0.34), CFrame.new(0, -0.27, 0.97), LIGHT, nil, BALL) -- конец рукоятки
+	add(V(0.05, 0.12, 0.95), CFrame.new(-0.33, 0.02, -0.5), GREYD) -- боковые накладки
+	add(V(0.05, 0.12, 0.95), CFrame.new(0.33, 0.02, -0.5), GREYD)
+	add(V(0.3, 0.04, 0.46), CFrame.new(0, 0.33, -0.4), GREYD) -- рамка дисплея
+	add(V(0.2, 0.05, 0.34), CFrame.new(0, 0.345, -0.4), RED, NEON, nil, 0.1) -- красный дисплей
+	add(V(0.12, 0.22, 0.22), CFrame.new(0, 0.37, -0.08) * UP, BLACK, nil, CYL) -- чёрная ручка
+	add(V(0.14, 0.62, 0.62), CFrame.new(0, 0.38, -0.85) * UP, LIGHT2, nil, CYL) -- основание купола
+	local dome = add(V(0.55, 0.42, 0.42), CFrame.new(0, 0.725, -0.85) * UP, GREEN, NEON, CYL, 0.2)
+	add(V(0.42, 0.42, 0.42), CFrame.new(0, 1.0, -0.85), GREEN, NEON, BALL, 0.2) -- верх купола
+	local core = add(V(0.5, 0.22, 0.22), CFrame.new(0, 0.725, -0.85) * UP, Color3.fromRGB(205, 255, 150), NEON, CYL, 0.1)
+
+	local l = Instance.new("PointLight")
+	l.Color, l.Range, l.Brightness = LIME, 9, 1.2
+	l.Parent = core
+	emitter(core, 30, { 0.5, 0.9 }, { 0.2, 0.5 }, 0.12, Color3.fromRGB(235, 255, 210), LIME)
+	local burst = emitter(dome, 0, { 0.3, 0.6 }, { 6, 10 }, 0.25, Color3.new(1, 1, 1), LIME)
+	burst.Enabled = false
+
+	local specks = {}
+	for i = 1, 2 do
+		local _, j = add(V(0.07, 0.07, 0.07), CFrame.new(0, 0.725, -0.85), Color3.new(1, 1, 1), NEON, BALL)
+		specks[i] = { w = j, ph = (i - 1) * math.pi }
+	end
+
+	return { model = m, grip = grip, weld = gw, dome = dome, light = l, c0 = CFrame.new(), burst = burst, specks = specks }
+end
+
+local function raiseArm(on)
+	local arm = char and char:FindFirstChild("RightUpperArm")
+	local sh = arm and arm:FindFirstChild("RightShoulder")
+	if not sh then
+		return false
+	end
+	if on then
+		shoulderC0 = shoulderC0 or sh.C0
+		sh.C0 = shoulderC0 * CFrame.Angles(math.rad(90), 0, 0)
+	elseif shoulderC0 then
+		sh.C0 = shoulderC0
+		shoulderC0 = nil
+	end
+	return true
+end
+
+local function equip(on)
+	if on == equipped then
+		return
+	end
+	if on then
+		if not (char and hum and hum.Health > 0) then
+			say("Нет персонажа")
+			return
+		end
+		gun = gun or buildGun()
+		local r15 = hum.RigType == Enum.HumanoidRigType.R15
+		local hand = char:FindFirstChild(r15 and "RightHand" or "Right Arm")
+		if not hand then
+			say("Не нашёл руку персонажа")
+			return
+		end
+		local c0 = CFrame.new(0, r15 and 0 or -0.9, -0.1) * CFrame.Angles(math.rad(10), 0, 0)
+		if r15 and raiseArm(true) then
+			c0 = CFrame.new(0, -0.15, 0) * CFrame.Angles(math.rad(-90), 0, 0) * CFrame.Angles(math.rad(8), 0, 0)
+		end
+		gun.c0 = c0
+		gun.weld.Part0, gun.weld.C0 = hand, c0
+		gun.grip.CFrame = hand.CFrame * c0
+		for _, d in ipairs(gun.model:GetDescendants()) do
+			if d:IsA("Weld") and d.Part0 == gun.grip then
+				d.Part1.CFrame = gun.grip.CFrame * d.C0
+			end
+		end
+		gun.model.Parent = char
+		say("Клик / «ПОРТАЛ» — выстрел")
+	else
+		raiseArm(false)
+		if gun then
+			gun.model.Parent = nil
+		end
+	end
+	equipped = on
+	cross.Visible = on and touchOnly
+	btnFire.Visible = on
+	btnGun.Text = on and "Пушка: ВКЛ" or "Пушка: ВЫКЛ"
+end
+
+---------------------------------------------------------------- портал
+local RINGS = {
+	{ 0.98, 14, LIME, 70 }, { 0.82, 12, Color3.fromRGB(40, 170, 60), -100 }, { 0.66, 14, DGREEN, 130 },
+	{ 0.50, 12, Color3.fromRGB(110, 235, 90), -160 }, { 0.34, 10, DGREEN, 190 }, { 0.18, 8, Color3.fromRGB(220, 255, 200), -220 },
+}
+local STRIPES = NumberSequence.new({
+	NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.24, 0), NumberSequenceKeypoint.new(0.26, 1),
+	NumberSequenceKeypoint.new(0.48, 1), NumberSequenceKeypoint.new(0.50, 0), NumberSequenceKeypoint.new(0.74, 0),
+	NumberSequenceKeypoint.new(0.76, 1), NumberSequenceKeypoint.new(1, 1),
+})
+
+local function scaleParts(P, s)
+	for _, e in ipairs(P.parts) do
+		e.p.Size = e.canvas and V(PW * s, PH * s, 0.05) or V(0.1, e.h * s, e.w * s)
+	end
+end
+
+local function buildPortal(cf)
+	local m = Instance.new("Model")
+	m.Name = "LocalPortal"
+	local P = { m = m, cf = cf, t = 0, rings = {}, parts = {} }
+
+	local function disk(color, mat, grow, off, tr)
+		local p = part(m, V(0.1, PH + grow, PW + grow), color, mat, CYL, tr, true)
+		p.CFrame = cf * CFrame.new(0, 0, -off) * CFrame.Angles(0, math.rad(90), 0)
+		P.parts[#P.parts + 1] = { p = p, h = PH + grow, w = PW + grow }
+		return p
+	end
+	local rim = disk(LIME, NEON, 0.7, 0, 0.15)
+	disk(GREEN, NEON, 0.1, 0.02, 0.05)
+	disk(DGREEN, nil, -1.8, 0.04, 0)
+
+	local l = Instance.new("PointLight")
+	l.Color, l.Range, l.Brightness = LIME, 24, 2
+	l.Parent = rim
+	P.light = l
+	P.sparks = emitter(rim, 25, { 0.9, 1.4 }, { 0.5, 1.5 }, 0.2, Color3.fromRGB(240, 255, 220), LIME)
+
+	local canvas = part(m, V(PW, PH, 0.05), LIME, nil, nil, 1, true)
+	canvas.CFrame = cf * CFrame.new(0, 0, -0.07)
+	P.parts[#P.parts + 1] = { p = canvas, canvas = true }
+
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local sg = Instance.new("SurfaceGui")
+		sg.Face, sg.SizingMode, sg.CanvasSize = face, Enum.SurfaceGuiSizingMode.FixedSize, Vector2.new(260, 400)
+		sg.LightInfluence, sg.Brightness = 0, 2
+		sg.Parent = canvas
+		for i, r in ipairs(RINGS) do
+			local f = Instance.new("Frame")
+			f.AnchorPoint, f.Position, f.Size = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), UDim2.fromScale(r[1], r[1])
+			f.BackgroundTransparency, f.BorderSizePixel = 1, 0
+			f.Parent = sg
+			local c = Instance.new("UICorner")
+			c.CornerRadius = UDim.new(1, 0)
+			c.Parent = f
+			local st = Instance.new("UIStroke")
+			st.Thickness, st.Color, st.ApplyStrokeMode = r[2], r[3], Enum.ApplyStrokeMode.Border
+			st.Parent = f
+			local g = Instance.new("UIGradient")
+			g.Transparency = STRIPES
+			g.Parent = st
+			P.rings[#P.rings + 1] = { g = g, speed = r[4], phase = i * 55 }
+		end
+	end
+	scaleParts(P, 0.03)
+	m.Parent = WS
+	P.sparks:Emit(40)
+	return P
+end
+
+local function closePortal(P)
+	if P and not P.closing then
+		P.closing = true
+		dying[#dying + 1] = P
+	end
+end
+
+local function updatePortal(P, dt, t)
+	P.t = P.closing and P.t - dt * 3 or math.min(1, P.t + dt * 2.4)
+	if P.t <= 0 then
+		P.dead = true
+		P.m:Destroy()
+		return
+	end
+	local s = math.max(0.03, 1 - (1 - math.clamp(P.t, 0, 1)) ^ 3)
+	scaleParts(P, s)
+	for _, r in ipairs(P.rings) do
+		r.g.Rotation = (t * r.speed + r.phase) % 360
+	end
+	P.light.Brightness = (1.8 + 0.7 * math.sin(t * 5)) * s
+end
+
+---------------------------------------------------------------- выстрел и телепорт
+local function addBeam(from, to)
+	local len = (to - from).Magnitude
+	if len < 0.1 then
+		return
+	end
+	local p = part(WS, V(0.18, 0.18, len), LIME, NEON, nil, 0, true)
+	p.CFrame = CFrame.lookAt((from + to) / 2, to)
+	beams[#beams + 1] = { p = p, age = 0 }
+end
+
+local function fireInner(useCenter)
+	local cam = WS.CurrentCamera
+	if not (equipped and gun and fireCd <= 0 and cam and char) then
+		return
+	end
+	local p
+	if useCenter or touchOnly then
+		p = cam.ViewportSize / 2
+	else
+		p = UIS:GetMouseLocation()
+	end
+	local ray = cam:ViewportPointToRay(p.X, p.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { char }
+	local hit = WS:Raycast(ray.Origin, ray.Direction * 300, params)
+	if not hit then
+		say("Нет поверхности: наведите на стену или пол")
+		return
+	end
+	fireCd, kick, flash = 0.35, 1, 1
+	gun.burst:Emit(25)
+	addBeam(gun.dome.Position, hit.Position)
+
+	local n = hit.Normal
+	local pos = hit.Position + n * 0.06
+	local floorLike = math.abs(n.Y) > 0.7
+	local cf
+	if floorLike then
+		local look = cam.CFrame.LookVector
+		local fl = Vector3.new(look.X, 0, look.Z)
+		cf = CFrame.lookAt(pos, pos + n, fl.Magnitude > 0.01 and fl.Unit or V(0, 0, -1))
+	else
+		local g = WS:Raycast(pos + n, V(0, -80, 0), params)
+		if g then
+			pos = V(pos.X, math.max(pos.Y, g.Position.Y + PH / 2 + 0.05), pos.Z)
+		end
+		cf = CFrame.lookAt(pos, pos + n)
+	end
+
+	local slot = nextSlot
+	nextSlot = 3 - slot
+	closePortal(portals[slot])
+	local P = buildPortal(cf)
+	P.pos, P.normal, P.floorLike = pos, n, floorLike
+	portals[slot] = P
+	say(slot == 1 and "Портал 1 открыт. Выстрелите ещё раз." or "Портал 2 открыт. Подойдите к любому вплотную.")
+end
+
+local function teleportTo(o)
+	local n, dir, pos = o.normal
+	if o.floorLike then
+		local look = root.CFrame.LookVector
+		dir = Vector3.new(look.X, 0, look.Z)
+		dir = dir.Magnitude > 0.01 and dir.Unit or V(0, 0, -1)
+		pos = o.pos + n * 3.6
+		root.AssemblyLinearVelocity = dir * 6 + n * 10
+	else
+		dir = Vector3.new(n.X, 0, n.Z).Unit
+		pos = o.pos + dir * 2.6
+		pos = V(pos.X, o.pos.Y - PH / 2 + 3.1, pos.Z)
+		root.AssemblyLinearVelocity = dir * 12
+	end
+	root.CFrame = CFrame.lookAt(pos, pos + dir)
+	tpCd, tpFlash = 1, 1
+end
+
+local function checkTeleport()
+	if tpCd > 0 or not root then
+		return
+	end
+	for i = 1, 2 do
+		local a, b = portals[i], portals[3 - i]
+		if a and b and a.t >= 0.9 and b.t >= 0.9 and not a.closing and not b.closing then
+			local rel = a.cf:PointToObjectSpace(root.Position)
+			local ex, ey = rel.X / (PW / 2), rel.Y / (PH / 2)
+			if math.abs(rel.Z) < (a.floorLike and 3.9 or 2) and ex * ex + ey * ey < 0.8 then
+				teleportTo(b)
+				return
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------- цикл, кнопки, персонаж
+local function step(dt)
+	local t = os.clock()
+	fireCd, tpCd = math.max(0, fireCd - dt), math.max(0, tpCd - dt)
+	if equipped and gun then
+		kick, flash = math.max(0, kick - dt * 3), math.max(0, flash - dt * 4)
+		gun.weld.C0 = gun.c0 * CFrame.new(0, 0, kick * 0.25)
+		gun.light.Brightness = 1.2 + 0.3 * math.sin(t * 6) + flash * 6
+		for _, sp in ipairs(gun.specks) do
+			local a = t * 5 + sp.ph
+			sp.w.C0 = CFrame.new(math.cos(a) * 0.09, 0.725 + 0.15 * math.sin(t * 3 + sp.ph), -0.85 + math.sin(a) * 0.09)
+		end
+	end
+	for i = 1, 2 do
+		if portals[i] then
+			updatePortal(portals[i], dt, t)
+		end
+	end
+	for i = #dying, 1, -1 do
+		updatePortal(dying[i], dt, t)
+		if dying[i].dead then
+			table.remove(dying, i)
+		end
+	end
+	for i = #beams, 1, -1 do
+		local b = beams[i]
+		b.age = b.age + dt
+		if b.age >= 0.25 then
+			b.p:Destroy()
+			table.remove(beams, i)
+		else
+			b.p.Transparency = b.age / 0.25
+		end
+	end
+	tpFlash = math.max(0, tpFlash - dt * 2.5)
+	flashFrame.BackgroundTransparency = 1 - 0.5 * tpFlash
+	local cam = WS.CurrentCamera
+	if cam then
+		cam.FieldOfView = cam.FieldOfView + (18 * tpFlash - fovAdd)
+		fovAdd = 18 * tpFlash
+	end
+	checkTeleport()
+end
+
+local loopFailed = false
+RunService.RenderStepped:Connect(function(dt)
+	local ok, err = pcall(step, dt)
+	if not ok and not loopFailed then
+		loopFailed = true
+		warn("[PortalGun] цикл: " .. tostring(err))
+		say("Ошибка (цикл): " .. tostring(err))
+	end
+end)
+
+btnGun.Activated:Connect(function()
+	safe("пушка", equip, not equipped)
+end)
+btnClose.Activated:Connect(function()
+	for i = 1, 2 do
+		closePortal(portals[i])
+		portals[i] = nil
+	end
+	nextSlot = 1
+	say("Порталы закрыты")
+end)
+btnFire.Activated:Connect(function()
+	safe("выстрел", fireInner, true)
+end)
+UIS.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		safe("выстрел", fireInner, false)
+	elseif input.KeyCode == Enum.KeyCode.Q then
+		safe("пушка", equip, not equipped)
+	end
+end)
+
+local function bind(c)
+	char, equipped, shoulderC0 = c, false, nil
+	cross.Visible = false
+	if gun then
+		gun.model:Destroy()
+		gun = nil
+	end
+	btnFire.Visible = false
+	btnGun.Text = "Пушка: ВЫКЛ"
+	hum = c:WaitForChild("Humanoid")
+	root = c:WaitForChild("HumanoidRootPart")
+end
+if plr.Character then
+	task.spawn(bind, plr.Character)
+end
+plr.CharacterAdded:Connect(bind)
+
+print("[PortalGun] готово: нажмите Q или кнопку «Пушка»")
